@@ -74,11 +74,11 @@ def read(file_name: str, limit: int = None) -> Tuple[List[List[int]], int, str]:
 
         data = np.fromstring(audiofile.raw_data, np.int16)
 
-        channels = []
-        for chn in range(audiofile.channels):
-            channels.append(data[chn::audiofile.channels])
+        return data, audiofile.frame_rate, unique_hash(file_name)
 
-        audiofile.frame_rate
+        # channels = []
+        # for chn in range(audiofile.channels):
+        #     channels.append(data[chn::audiofile.channels])
     except audioop.error:
         _, _, audiofile = wavio.readwav(file_name)
 

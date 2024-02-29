@@ -6,6 +6,11 @@ from itertools import groupby
 from time import time
 from typing import Dict, List, Tuple
 
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
+from torchaudio.transforms import Spectrogram
+
 import dejavu.logic.decoder as decoder
 from dejavu.base_classes.base_database import get_database
 from dejavu.config.settings import (DEFAULT_FS, DEFAULT_OVERLAP_RATIO,
@@ -18,7 +23,56 @@ from dejavu.config.settings import (DEFAULT_FS, DEFAULT_OVERLAP_RATIO,
 from dejavu.logic.fingerprint import fingerprint
 
 
+def custom_collate(batch: list):
+    song_names, file_names, channels, fs, file_hashes = zip(*batch)
+    channels = pad_sequence(channels, batch_first=True)
+    return song_names, file_names, channels, fs, file_hashes
+
+class AudioDataset(Dataset):
+    def __init__(self, path: str, extensions: str, songhashes_set, limit, print_output=True):
+        self._limit = limit
+        self._print_output = print_output
+        self._filenames_to_fingerprint = []
+        for filename, _ in decoder.find_files(path, extensions):
+            # don't refingerprint already fingerprinted files
+            if decoder.unique_hash(filename) in songhashes_set:
+                print(f"{filename} already fingerprinted, continuing...")
+                continue
+
+            self._filenames_to_fingerprint.append(filename)
+
+    def __len__(self):
+        return len(self._filenames_to_fingerprint)
+
+    def __getitem__(self, i):
+        file_name = self._filenames_to_fingerprint[i]
+        song_name, extension = os.path.splitext(os.path.basename(file_name))
+
+        channels, fs, file_hash = decoder.read(file_name, self._limit)
+        # fingerprints = set()
+        # channel_amount = len(channels)
+        # for channeln, channel in enumerate(channels, start=1):
+        #     if self._print_output:
+        #         print(f"Fingerprinting channel {channeln}/{channel_amount} for {file_name}")
+
+        #     hashes = fingerprint(channel, cls._spec, Fs=fs)
+
+        #     if self._print_output:
+        #         print(f"Finished channel {channeln}/{channel_amount} for {file_name}")
+
+        #     fingerprints |= set(hashes)
+
+        return song_name, file_name, torch.from_numpy(channels), fs, file_hash
+
+
+
 class Dejavu:
+    _spec = Spectrogram(
+        n_fft=4096,
+        hop_length=int(4096 * (1 - 0.5)),
+        window_fn=torch.hann_window
+    )
+
     def __init__(self, config):
         self.config = config
 
@@ -79,44 +133,53 @@ class Dejavu:
         else:
             nprocesses = 1 if nprocesses <= 0 else nprocesses
 
-        pool = multiprocessing.Pool(nprocesses)
+        audio_data = AudioDataset(path, extensions, self.songhashes_set, limit=self.limit)
+        loader = DataLoader(audio_data, batch_size=32, shuffle=False, num_workers=nprocesses, pin_memory=True)
 
-        filenames_to_fingerprint = []
-        for filename, _ in decoder.find_files(path, extensions):
-            # don't refingerprint already fingerprinted files
-            if decoder.unique_hash(filename) in self.songhashes_set:
-                print(f"{filename} already fingerprinted, continuing...")
-                continue
+        # pool = multiprocessing.Pool(nprocesses)
 
-            filenames_to_fingerprint.append(filename)
+        # filenames_to_fingerprint = []
+        # for filename, _ in decoder.find_files(path, extensions):
+        #     # don't refingerprint already fingerprinted files
+        #     if decoder.unique_hash(filename) in self.songhashes_set:
+        #         print(f"{filename} already fingerprinted, continuing...")
+        #         continue
+
+        #     filenames_to_fingerprint.append(filename)
 
         # Prepare _fingerprint_worker input
-        worker_input = list(zip(filenames_to_fingerprint, [self.limit] * len(filenames_to_fingerprint)))
+        # worker_input = list(zip(filenames_to_fingerprint, [self.limit] * len(filenames_to_fingerprint)))
 
         # Send off our tasks
-        iterator = pool.imap_unordered(Dejavu._fingerprint_worker, worker_input)
+        # iterator = pool.imap_unordered(Dejavu._fingerprint_worker, worker_input)
 
         # Loop till we have all of them
-        while True:
-            try:
-                song_name, hashes, file_hash = next(iterator)
-            except multiprocessing.TimeoutError:
-                continue
-            except StopIteration:
-                break
-            except Exception:
-                print("Failed fingerprinting")
-                # Print traceback because we can't reraise it here
-                traceback.print_exc(file=sys.stdout)
-            else:
-                sid = self.db.insert_song(song_name, file_hash, len(hashes))
+        # while True:
+        #     try:
+        #         # song_name, hashes, file_hash = next(iterator)
+        #     except multiprocessing.TimeoutError:
+        #         continue
+        #     except StopIteration:
+        #         break
+        #     except Exception:
+        #         print("Failed fingerprinting")
+        #         # Print traceback because we can't reraise it here
+        #         traceback.print_exc(file=sys.stdout)
+        #     else:
+        #         sid = self.db.insert_song(song_name, file_hash, len(hashes))
 
-                self.db.insert_hashes(sid, hashes)
-                self.db.set_song_fingerprinted(sid)
-                self.__load_fingerprinted_audio_hashes()
+        #         self.db.insert_hashes(sid, hashes)
+        #         self.db.set_song_fingerprinted(sid)
+        #         self.__load_fingerprinted_audio_hashes()
 
-        pool.close()
-        pool.join()
+        # pool.close()
+        # pool.join()
+        for song_names, file_names, channels, fs, file_hashes in iter(loader):
+            hashes = self.get_file_fingerprints(file_names, self.limit, print_output=True)
+            sid = self.db.insert_song(song_names, file_hashes, len(hashes))
+            self.db.insert_hashes(sid, hashes)
+            self.db.set_song_fingerprinted(sid)
+            self.__load_fingerprinted_audio_hashes()
 
     def fingerprint_file(self, file_path: str, song_name: str = None) -> None:
         """
@@ -133,7 +196,7 @@ class Dejavu:
         if song_hash in self.songhashes_set:
             print(f"{song_name} already fingerprinted, continuing...")
         else:
-            song_name, hashes, file_hash = Dejavu._fingerprint_worker(
+            song_name, hashes, file_hash = self._fingerprint_worker(
                 file_path,
                 self.limit,
                 song_name=song_name
@@ -225,8 +288,8 @@ class Dejavu:
         r = recognizer(self)
         return r.recognize(*options, **kwoptions)
 
-    @staticmethod
-    def _fingerprint_worker(arguments):
+    @classmethod
+    def _fingerprint_worker(cls, arguments):
         # Pool.imap sends arguments as tuples so we have to unpack
         # them ourself.
         try:
@@ -236,24 +299,25 @@ class Dejavu:
 
         song_name, extension = os.path.splitext(os.path.basename(file_name))
 
-        fingerprints, file_hash = Dejavu.get_file_fingerprints(file_name, limit, print_output=True)
+        fingerprints, file_hash = cls.get_file_fingerprints(file_name, limit, print_output=True)
 
         return song_name, fingerprints, file_hash
 
-    @staticmethod
-    def get_file_fingerprints(file_name: str, limit: int, print_output: bool = False):
-        channels, fs, file_hash = decoder.read(file_name, limit)
-        fingerprints = set()
+    @classmethod
+    def get_file_fingerprints(cls, file_names: str, channels, fs, file_hashes, limit: int, print_output: bool = False):
+        # channels, fs, file_hash = decoder.read(file_name, limit)
+        # fingerprints = set()
         channel_amount = len(channels)
-        for channeln, channel in enumerate(channels, start=1):
-            if print_output:
-                print(f"Fingerprinting channel {channeln}/{channel_amount} for {file_name}")
+        # for channeln, channel in enumerate(channels, start=1):
+            # if print_output:
+            #     print(f"Fingerprinting channel {channeln}/{channel_amount} for {file_names}")
 
-            hashes = fingerprint(channel, Fs=fs)
+        hashes = fingerprint(channels, cls._spec, Fs=fs)
 
-            if print_output:
-                print(f"Finished channel {channeln}/{channel_amount} for {file_name}")
+            # if print_output:
+            #     print(f"Finished channel {channeln}/{channel_amount} for {file_names}")
 
-            fingerprints |= set(hashes)
+        # TODO: remove hashes corresponding to padding
+        fingerprints = set(hashes)
 
-        return fingerprints, file_hash
+        return fingerprints, file_hashes

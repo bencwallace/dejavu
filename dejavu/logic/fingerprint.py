@@ -5,10 +5,12 @@ from typing import List, Tuple
 import matplotlib.mlab as mlab
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from scipy.ndimage.filters import maximum_filter
 from scipy.ndimage.morphology import (binary_erosion,
                                       generate_binary_structure,
                                       iterate_structure)
+from torchaudio.transforms import Spectrogram
 
 from dejavu.config.settings import (CONNECTIVITY_MASK, DEFAULT_AMP_MIN,
                                     DEFAULT_FAN_VALUE, DEFAULT_FS,
@@ -19,6 +21,7 @@ from dejavu.config.settings import (CONNECTIVITY_MASK, DEFAULT_AMP_MIN,
 
 
 def fingerprint(channel_samples: List[int],
+                spec,
                 Fs: int = DEFAULT_FS,
                 wsize: int = DEFAULT_WINDOW_SIZE,
                 wratio: float = DEFAULT_OVERLAP_RATIO,
@@ -35,22 +38,29 @@ def fingerprint(channel_samples: List[int],
     :param amp_min: minimum amplitude in spectrogram in order to be considered a peak.
     :return: a list of hashes with their corresponding offsets.
     """
+    # spec = Spectrogram(
+    #     n_fft=wsize,
+    #     hop_length=int(wsize * (1 - wratio)),
+    #     window_fn=torch.hann_window
+    # )
+    # breakpoint()
+    arr2D = spec(torch.from_numpy(channel_samples).double()).numpy()
     # FFT the signal and extract frequency components
-    arr2D = mlab.specgram(
-        channel_samples,
-        NFFT=wsize,
-        Fs=Fs,
-        window=mlab.window_hanning,
-        noverlap=int(wsize * wratio))[0]
+    # arr2D = mlab.specgram(
+    #     channel_samples,
+    #     NFFT=wsize,
+    #     Fs=Fs,
+    #     window=mlab.window_hanning,
+    #     noverlap=int(wsize * wratio))[0]
 
     # Apply log transform since specgram function returns linear array. 0s are excluded to avoid np warning.
     arr2D = 10 * np.log10(arr2D, out=np.zeros_like(arr2D), where=(arr2D != 0))
 
+    # TODO: make sure this vectorizes
     local_maxima = get_2D_peaks(arr2D, plot=False, amp_min=amp_min)
 
     # return hashes
     return generate_hashes(local_maxima, fan_value=fan_value)
-
 
 def get_2D_peaks(arr2D: np.array, plot: bool = False, amp_min: int = DEFAULT_AMP_MIN)\
         -> List[Tuple[List[int], List[int]]]:
