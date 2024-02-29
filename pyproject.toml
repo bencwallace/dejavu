@@ -15,11 +15,18 @@ pydub = "^0.23.1"
 pyaudio = "^0.2.11"
 psycopg2-binary = "^2.8.3"
 mysql-connector-python = "^8.0.17"
+torch = {version = "^2.2.1+cu118", source = "pytorch-cu118"}
+torchaudio = {version = "^2.2.1+cu118", source = "pytorch-cu118"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^5.0.1"
 ipython = "*"
 pgcli = "^4.0.1"
+
+[[tool.poetry.source]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
