@@ -18,5 +18,12 @@ services:
       - db
     networks:
       - db_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 networks:
   db_network:
